@@ -175,6 +175,7 @@ def train_and_test(use_larger_weights, learning_rate, activation_fn, training_ba
                    np.random.normal(size=(128, 128), scale=10.0).astype(np.float32),
                    np.random.normal(size=(128, 10), scale=10.0).astype(np.float32)
                    ]
+    #这里的size是层的输入和输出尺度
     else:
         weights = [np.random.normal(size=(784, 128), scale=0.05).astype(np.float32),
                    np.random.normal(size=(128, 128), scale=0.05).astype(np.float32),
