@@ -1,136 +1,103 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data.sampler import SubsetRandomSampler
+import torchvision
+import torchvision.transforms as transforms
 import numpy as np
-from collections import defaultdict
+import time
+from matplotlib import pyplot as plt
 
 """
-最关键的是得知输入的尺度，形式
-代码分为两个部分：前向传播和反向传播
-前向传播是BN操作
-反向传播为了更新参数
-"""
-
-"""
-BN的前向传导，分为数据输入，训练，测试，传出
-如果得到从上一层传来的x和相应的权重
-BN_in的功能是为BN层提供输入
+核心函数，已知gamma和beta是要在module里进行更新的，所以不在这里写
 """
 
 
-class bn_layer:
-    def __init__(self, train_state, learning_rate, forward_state, first, gamma=1, beta=0, eps=1e-8):
-        self.train_state = train_state
-        self.learning_rate = learning_rate
-        self.forward_state = forward_state
-        self.first = first  # 是否是第一次，即初始化
-        self.N = x.shape[1]
-        self.gamma = gamma
-        self.beta = beta
-        self.eps = eps
+def batch_norm(is_training, X, eps, gamma, beta, running_mean, running_var, alpha):
+    #
+    assert len(X.shape) in (2, 4)
+    if is_training:
+        """ 
+        Shape:
+        - Input::math: `(N, C)`
+        - Output::math: `(N, C)`(same
+        shape as input)
+        """
+        # X [batch,n]或X [batch,n，L]
+        if len(X.shape) <= 3:
+            # 是对每一个channel的数据进行求均值和求方差，而对应输入的x数据，应该要映射到第一个维度上所以dim=0
+            mean = X.mean(dim=0)
+            var = X.var(dim=0, unbiased=False)
 
-    """
-    训练时前向传播函数
-    cache为缓存，便于记录值，简化运算
-    """
 
-    def bn_forward_train(self, layer_in, d_cache):
-        mean_now = np.mean(layer_in, axis=0)  # 计算均值
-        N = self.N
-        var_now = (N / N - 1) * np.var(layer_in, axis=0)  # 计算每一列的标准差的无偏估计
-
-        if self.first:
-            mean = mean_now
-            var = var_now
-            gamma = self.gamma
-            beta = self.beta
-            self.first = false
         else:
-            gamma = d_cache['gamma']
-            beta = d_cache['beta']
-            mean = d_cache['mean']
-            var = d_cache['var']
-            mean = momentun * mean + (1 - momentun) * mean_now  # 计算滑动均值
-            var = momentun * var + (1 - momentun) * var_now  # 计算滑动标准差
+            """ 
+            Shape:
+            - Input::math: `(N, C, H, W)`
+            - Output::math: `(N, C, H, W)`(same
+            shape as input)
+            """
+            # X [batch,c,h,w]
+            # 先把所有样本的均值求出，再算高度和宽度上的，收缩到每一个通道，方差同理
+            N = X.shape[0] * X.shape[2] * X.shape[3]  # 统计样本数，便于后续做无偏估计
+            mean = X.mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3, keepdim=True)
+            var =  ((X - mean) ** 2).mean(dim=0, keepdim=True).mean(dim=2, keepdim=True).mean(dim=3,keepdim=True)
 
-        x_m = x - mean
-        v_l = 1 / sqrt(var + eps)
+        X_hat = (X - mean) / torch.sqrt(var + eps)
+        # 求滑动平均值
+        running_mean = alpha * mean + (1 - alpha) * running_mean
+        # 求滑动方差
+        running_var = alpha * var + (1 - alpha) * running_var
+    # 如果是测试过程，就只将得到的数据带入计算
+    else:
+        X_hat = (X - running_mean) / torch.sqrt(running_var + eps)
 
-        x_norm = x_m / v_l
-        x_out = gamma * x_norm + beta
+    # print(gamma.shape,X_hat.shape,beta.shape)
+    Y = gamma * X_hat + beta  #
 
-        d_cache['mean'] = mean
-        d_cache['var'] = var
-        d_cache['gamma'] = gamma
-        d_cache['N'] = N
-        d_cache['x_m'] = x_m
-        d_cache['v_l'] = v_l
-        d_cache['x_norm'] = x_norm
-        return x_out, d_cache
-
-    """
-    测试时前向传播函数
-    用测试集所有数据算平均和标准差
-    使用已经训练好的gamma和beta
-    """
-
-    def bn_forward_test(self, layer_in, d_cache):
-        x_norm = (layer_in - np.mean(layer_in, axis=0)) / sqrt(np.var(layer_in, axis=0) + self.eps)
-        x_last = d_cache['gamma'] * x_norm + d_cache['beta']
-        return x_last
-
-    """
-    反向传播，主要通过导数进行参数更新
-    :param dy是loss函数对y的求导，可以看出其他的求偏导都是和dy相关的
-    :param dx是loss函数对x的求导
-    :param dx_u是loss函数对x均的求导
-    :param du是loss函数对均值u的求导
-    :param dD是loss函数对方差的求导
-    :param dr是loss函数对gamma的求导
-    :param db是loss函数对beta的求导
-    """
-
-    def bn_backward_train(self, dy, d_cache):
-        gamma = d_cache['gamma']
-        N = d_cache['N']
-        x_m = d_cache['x_m']
-        v_l = d_cache['v_l']
-        x_norm = d_cache['x_norm']
-
-        dx_u = dy * gamma
-        dr = np.sum(dy * x_norm, axis=0)
-        db = np.sum(dy, axis=0)
-        dD = np.sum(dx_u * x_m * (-0.5) * v_l ** 3, axis=0)
-        du = np.sum(dx_u * (-v_l), axis=0) + dD * 1 / N * np.sum(-2 * x_m, axis=0)
-        dx = dx_u * v_l + dD * 2 * x_m / N + du / N
-        return dx, dr, db
-
-    """
-    输出函数,将几个函数的输出整合
-    """
-
-    def output(self, layer_in, d_cache, dy=None):
-        if self.train_state and self.forward_state:
-            x_out, d_cache = bn_forward_train(self, layer_in, d_cache)
-            return x_out, d_cache
-        if self.train_state and not self.forward_state:
-            dx, dr, db = bn_backward_train(dy)
-            # write_self(self, dr, db)
-            return dx, d_cache
-        if not self.train_state:
-            x_out = bn_forward_test(self, layer_in)
-            return x_out, d_cache
+    return Y, running_mean, running_var
 
 
-# x*w矩阵,x每一行对应着不同维度的一个数据，一列对应着一个维度的一组数据，w每一列对应着不同维度计算的权重，每一行对应着每一组数据，x的列数等于w的行数
-def bn_in(x, w):
-    layer_in = tf.matmul(x, w)
-    return layer_in
+class BatchNorm(nn.Module):
+    def __init__(self, dimension_type, in_channels):
+        super(BatchNorm, self).__init__()
+        # 卷积层/全连接层归一化后的线性变换参数.
+        if dimension_type == 2:
+            # x:[batch,n]
+            shape = (1, in_channels)
+            self.gamma = nn.Parameter(torch.ones(shape))  # 是可学习的参数.反向传播时需要根据梯度更新,写入parameter方便更新.
+            self.beta = nn.Parameter(torch.zeros(shape))  # 是可学习的参数.反向传播时需要根据梯度更新.
+            self.running_mean = torch.zeros(shape)  # 不需要求梯度.在forward时候更新.
+            self.running_var = torch.zeros(shape)  # 不需要求梯度.在forward时候更新.
+        else:
+            # x:[btach,c,h,w]
+            shape = (1, in_channels, 1, 1)
+            self.gamma = nn.Parameter(torch.ones(shape))
+            self.beta = nn.Parameter(torch.zeros(shape))
+            self.running_mean = torch.zeros(shape)
+            self.running_var = torch.zeros(shape)
 
+        self.eps = 1e-5
+        self.momentum = 0.9
 
-# 假设net中有layer_in,train_state, learning_rate, forward_state,dy这几个参数
-bn_operation: bn_layer = bn_layer(layer_in=layer_in, train_state=net.train_state, learning_rate=net.learning_rate,
-                                  forward_state=net.forward_state, first=true)
-# d_cache中记载上一层训练的一些参数，用于本次计算
-# 如果是初始化，要先初始化缓存
-if bn_operation.first:
-    d_cache = defaultdict(list)
-# 后续训练调用之前缓存区的内容帮助计算
-x_out, d_cache = bn_operation.output(layer_in=net.layer_in, d_cache=d_cache, dy=net.dy)
+    def forward(self, x):
+        # 如果X不在内存上，将moving_mean和moving_var复制到X所在显存上
+        """
+        if self.running_mean.device != x.device:
+            self.running_mean = self.running_mean.to(x.device)
+            self.running_var = self.running_var.to(x.device)
+        """
+        # self.training继承自nn.Module,默认true,调用.eval()会设置成false
+        if self.training:
+            Y, self.running_mean, self.running_var = batch_norm(is_training=True, X=x, eps=self.eps, gamma=self.gamma,
+                                                                beta=self.beta,
+                                                                running_mean=self.running_mean,
+                                                                running_var=self.running_var, alpha=self.momentum)
+        else:
+            Y, self.running_mean, self.running_var = batch_norm(is_training=False, X=x, eps=self.eps, gamma=self.gamma,
+                                                                beta=self.beta,
+                                                                running_mean=self.running_mean,
+                                                                running_var=self.running_var, alpha=self.momentum)
+
+        return Y
