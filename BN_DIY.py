@@ -82,12 +82,6 @@ class BatchNorm(nn.Module):
         self.momentum = 0.9
 
     def forward(self, x):
-        # 如果X不在内存上，将moving_mean和moving_var复制到X所在显存上
-        """
-        if self.running_mean.device != x.device:
-            self.running_mean = self.running_mean.to(x.device)
-            self.running_var = self.running_var.to(x.device)
-        """
         # self.training继承自nn.Module,默认true,调用.eval()会设置成false
         if self.training:
             Y, self.running_mean, self.running_var = batch_norm(is_training=True, X=x, eps=self.eps, gamma=self.gamma,
